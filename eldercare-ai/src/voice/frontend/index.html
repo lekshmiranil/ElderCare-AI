@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin:0; padding:4px; font-family: "Segoe UI", Arial, sans-serif; color:#12263A; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  button { min-height:56px; padding:0 22px; font-size:20px; font-weight:600; border-radius:12px; cursor:pointer;
+           border:2px solid #0E7C86; background:#0E7C86; color:#FFFFFF; }
+  button.secondary { background:#FFFFFF; color:#0B3C5D; border-color:#0B3C5D; }
+  button[aria-pressed="true"] { background:#C0392B; border-color:#C0392B; }
+  button:disabled { background:#D5E2EA; border-color:#D5E2EA; color:#5A6B7A; cursor:not-allowed; }
+  button:focus-visible { outline:4px solid #E0A030; outline-offset:2px; }
+  #status { margin-top:10px; font-size:18px; min-height:24px; }
+</style>
+</head>
+<body>
+<div class="row">
+  <button id="mic" type="button" aria-pressed="false">Speak</button>
+  <button id="listen" type="button" class="secondary" hidden>Read last answer aloud</button>
+  <button id="stopspeak" type="button" class="secondary" hidden>Stop reading</button>
+</div>
+<div id="status" role="status" aria-live="polite"></div>
+<script>
+(function () {
+  // Browser speech only. This file makes no network requests of its own and never calls any AI service.
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var synth = window.speechSynthesis;
+  var LANG = "en-IN";
+  var ERRORS = {
+    "not-allowed": "The microphone is blocked. Please allow it in your browser, or type your question.",
+    "service-not-allowed": "The microphone is blocked. Please allow it in your browser, or type your question.",
+    "no-speech": "I did not hear anything. Please try again, or type your question.",
+    "audio-capture": "No microphone was found. Please type your question instead.",
+    "network": "Voice recognition needs an internet connection in this browser. Please type instead.",
+    "default": "Voice input did not work this time. Please type your question instead."
+  };
+  var $ = function (id) { return document.getElementById(id); };
+  var mic = $("mic"), listenBtn = $("listen"), stopBtn = $("stopspeak"), statusEl = $("status");
+  var args = {}, rec = null, listening = false, lastSpeakId = null;
+
+  function post(type, payload) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, payload || {}), "*");
+  }
+  function fit() { post("streamlit:setFrameHeight", { height: document.body.scrollHeight + 8 }); }
+  function say(msg) { statusEl.textContent = msg; fit(); }
+
+  function speak(text) {
+    if (!synth || !text) { return false; }
+    synth.cancel();
+    var u = new SpeechSynthesisUtterance(text);
+    u.lang = LANG; u.rate = 0.9;
+    synth.speak(u);
+    return true;
+  }
+
+  if (!SR) {
+    mic.disabled = true;
+    say("Voice input is not available in this browser. Please type your question or use the buttons. " +
+        "Chrome and Edge support voice input.");
+  }
+
+  mic.addEventListener("click", function () {
+    if (!SR) { return; }
+    if (listening && rec) { rec.stop(); return; }
+    if (synth) { synth.cancel(); }
+    rec = new SR();
+    rec.lang = LANG; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+    var finalText = "", interimText = "", failed = false;
+    rec.onstart = function () {
+      listening = true; mic.textContent = "Listening... tap to stop"; mic.setAttribute("aria-pressed", "true");
+      say("Listening. Please speak now.");
+    };
+    rec.onresult = function (e) {
+      interimText = "";
+      for (var i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) { finalText += e.results[i][0].transcript; }
+        else { interimText += e.results[i][0].transcript; }
+      }
+      say("I heard: " + (finalText || interimText));
+    };
+    rec.onerror = function (e) { failed = true; say(ERRORS[e.error] || ERRORS["default"]); };
+    rec.onend = function () {
+      listening = false; mic.textContent = "Speak"; mic.setAttribute("aria-pressed", "false");
+      var text = (finalText || interimText).trim();
+      if (text) {
+        say("I heard: " + text);
+        post("streamlit:setComponentValue",
+             { value: { id: Date.now() + "-" + Math.random().toString(36).slice(2), text: text }, dataType: "json" });
+      } else if (!failed) { say(ERRORS["no-speech"]); }
+    };
+    try { rec.start(); } catch (err) { say(ERRORS["default"]); }   // never retried automatically
+  });
+
+  listenBtn.addEventListener("click", function () { speak(args.last_text); });
+  stopBtn.addEventListener("click", function () { if (synth) { synth.cancel(); } });
+  window.addEventListener("beforeunload", function () { if (synth) { synth.cancel(); } });
+
+  window.addEventListener("message", function (ev) {
+    if (!ev.data || ev.data.type !== "streamlit:render") { return; }
+    args = ev.data.args || {};
+    var canSpeak = !!synth;
+    listenBtn.hidden = !(canSpeak && args.last_text);
+    stopBtn.hidden = !canSpeak;
+    var once = args.speak;
+    if (once && once.id !== lastSpeakId) {
+      lastSpeakId = once.id;
+      if (args.auto_speak) { speak(once.text); }   // may be blocked by the browser; the button always works
+    }
+    fit();
+  });
+
+  post("streamlit:componentReady", { apiVersion: 1 });
+  fit();
+})();
+</script>
+</body>
+</html>
